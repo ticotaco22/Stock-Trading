@@ -18,6 +18,7 @@ import plotly.express as px
 import openai  # Ensure OpenAI API is installed and set up
 import pytz
 
+
 # Configure the page to use the full screen
 st.set_page_config(
     page_title="Real-Time Stock Analysis",
@@ -150,6 +151,14 @@ def calculate_indicators(df):
         df['Signal_Line'] = signal_line
         df['MACD'] = macd_diff
 
+        # Add Bollinger Bands
+        bb = ta.volatility.BollingerBands(close_series, window=20, window_dev=2)
+        df['BB_Upper'] = bb.bollinger_hband()
+        df['BB_Lower'] = bb.bollinger_lband()
+
+        # Add ATR
+        df['ATR'] = ta.volatility.average_true_range(df['High'], df['Low'], df['Close'], window=14)
+
         return df
     except Exception as e:
         st.error(f"Error calculating indicators: {e}")
@@ -157,37 +166,133 @@ def calculate_indicators(df):
 
 
 
-
 def check_trade_signal(data):
-    """Check the latest trade signal."""
+    """Check the latest trade signal with rigorous conditions, detailed reasoning, and weighted indicators."""
     if data.empty or len(data) < 1:
-        return None, None, None
+        return None, None, None, "No data available to evaluate signals."
 
     # Ensure the required indicators exist
-    required_columns = ['9_EMA', '21_EMA', 'Close', 'VWAP']
+    required_columns = ['9_EMA', '21_EMA', 'Close', 'VWAP', 'BB_Upper', 'BB_Lower', 'RSI', 'ATR']
     missing_columns = [col for col in required_columns if col not in data.columns]
     if missing_columns:
-        st.warning(f"Missing required columns for trade signal: {', '.join(missing_columns)}")
-        return None, None, None
+        return None, None, None, f"Missing required columns: {', '.join(missing_columns)}"
 
     # Select the last row
     row = data.iloc[-1]
 
-    # Evaluate buy/sell conditions
+    # Extract indicator values
     ema_9 = row['9_EMA']
     ema_21 = row['21_EMA']
     close = row['Close']
     vwap = row['VWAP']
+    bb_upper = row['BB_Upper']
+    bb_lower = row['BB_Lower']
+    rsi = row['RSI']
+    atr = row['ATR']
 
-    if pd.isnull([ema_9, ema_21, close, vwap]).any():
-        return None, None, None
+    # Validate all indicators
+    if pd.isnull([ema_9, ema_21, close, vwap, bb_upper, bb_lower, rsi, atr]).any():
+        return None, None, None, "One or more indicator values are missing or invalid."
 
-    if ema_9 > ema_21 and close > vwap:
-        return "BUY", row['Datetime'], close
-    elif ema_9 < ema_21 and close < vwap:
-        return "SELL", row['Datetime'], close
+    # Define thresholds
+    atr_threshold_low = 0.005 * close  # 0.5% of Close
+    atr_threshold_high = 0.02 * close  # 2% of Close
 
-    return None, None, None
+    # Define weights for indicators
+    weights = {
+        "EMA": 0.3,         # 30% weight
+        "VWAP": 0.25,       # 25% weight
+        "Bollinger Bands": 0.2,  # 20% weight
+        "RSI": 0.15,        # 15% weight
+        "ATR": 0.1          # 10% weight
+    }
+
+    # Evaluate indicators and assign scores
+    score = 0
+    total_weight = sum(weights.values())
+    reasoning_parts = []
+
+    # Trend Confirmation (EMA)
+    if ema_9 > ema_21:
+        score += weights["EMA"]
+        reasoning_parts.append(
+            f"- **Trend Confirmation**: Short-term EMA (9_EMA = {ema_9:.2f}) is above long-term EMA (21_EMA = {ema_21:.2f}), "
+            f"indicating an uptrend (+{weights['EMA']*100:.0f}%)."
+        )
+    else:
+        reasoning_parts.append(
+            f"- **Trend Confirmation**: Short-term EMA (9_EMA = {ema_9:.2f}) is below long-term EMA (21_EMA = {ema_21:.2f}), "
+            f"indicating a downtrend (0%)."
+        )
+
+    # Price Action Alignment with VWAP
+    if close > vwap:
+        score += weights["VWAP"]
+        reasoning_parts.append(
+            f"- **Price Action Alignment with VWAP**: Close price ({close:.2f}) is above VWAP ({vwap:.2f}), "
+            f"signaling bullish sentiment (+{weights['VWAP']*100:.0f}%)."
+        )
+    else:
+        reasoning_parts.append(
+            f"- **Price Action Alignment with VWAP**: Close price ({close:.2f}) is below VWAP ({vwap:.2f}), "
+            f"signaling bearish sentiment (0%)."
+        )
+
+    # Bollinger Bands Positioning
+    if close > (bb_upper + bb_lower) / 2:
+        score += weights["Bollinger Bands"]
+        reasoning_parts.append(
+            f"- **Bollinger Band Positioning**: Close price ({close:.2f}) is in the upper half of Bollinger Bands "
+            f"(BB_Upper = {bb_upper:.2f}, BB_Lower = {bb_lower:.2f}) (+{weights['Bollinger Bands']*100:.0f}%)."
+        )
+    else:
+        reasoning_parts.append(
+            f"- **Bollinger Band Positioning**: Close price ({close:.2f}) is in the lower half of Bollinger Bands "
+            f"(BB_Upper = {bb_upper:.2f}, BB_Lower = {bb_lower:.2f}) (0%)."
+        )
+
+    # RSI Momentum
+    if 50 <= rsi <= 70:
+        score += weights["RSI"]
+        reasoning_parts.append(
+            f"- **RSI Momentum**: RSI ({rsi:.2f}) indicates bullish momentum (+{weights['RSI']*100:.0f}%)."
+        )
+    elif 30 <= rsi < 50:
+        reasoning_parts.append(
+            f"- **RSI Momentum**: RSI ({rsi:.2f}) indicates bearish momentum (0%)."
+        )
+    else:
+        reasoning_parts.append(
+            f"- **RSI Momentum**: RSI ({rsi:.2f}) indicates neutral momentum (0%)."
+        )
+
+    # ATR Volatility Check
+    if atr_threshold_low <= atr <= atr_threshold_high:
+        score += weights["ATR"]
+        reasoning_parts.append(
+            f"- **Volatility Check (ATR)**: ATR ({atr:.2f}) is within the acceptable range "
+            f"({atr_threshold_low:.2f} - {atr_threshold_high:.2f}) (+{weights['ATR']*100:.0f}%)."
+        )
+    else:
+        reasoning_parts.append(
+            f"- **Volatility Check (ATR)**: ATR ({atr:.2f}) is outside the acceptable range "
+            f"({atr_threshold_low:.2f} - {atr_threshold_high:.2f}) (0%)."
+        )
+
+    # Calculate final weighted score
+    weighted_score = score / total_weight  # Normalize score to a 0-1 range
+
+    # Determine signal based on weighted score
+    if weighted_score >= 0.7:  # Threshold for a Buy signal
+        reasoning = "Buy signal generated because the following conditions were met:\n" + "\n".join(reasoning_parts)
+        return "BUY", row['Datetime'], close, reasoning
+    elif weighted_score <= 0.3:  # Threshold for a Sell signal
+        reasoning = "Sell signal generated because the following conditions were met:\n" + "\n".join(reasoning_parts)
+        return "SELL", row['Datetime'], close, reasoning
+    else:
+        reasoning = "No signal generated because the overall weighted score did not meet the thresholds:\n" + "\n".join(reasoning_parts)
+        return None, None, None, reasoning
+
 
 
 
@@ -216,13 +321,14 @@ def display_ticker_analysis():
                 st.dataframe(data.tail(10))  # Show last 10 rows
 
                 # Check trade signal
-                signal, signal_time, signal_price = check_trade_signal(data)
+                # After (expecting 4 values)
+                signal, signal_time, signal_price, reasoning = check_trade_signal(data)
+
                 if signal:
-                    st.success(f"Trade Signal: {signal} at {signal_price:.2f} ({signal_time})")
+                    st.success(f"Trade Signal: {signal} at {signal_price:.2f} ({signal_time})\n\nReasoning:\n{reasoning}")
                 else:
-                    st.info("No trade signal detected.")
-            else:
-                st.warning(f"No data available for {ticker}.")
+                    st.info(f"No trade signal detected.\n\nReasoning:\n{reasoning}")
+
 
 
 def plot_interactive_chart(ticker, data, signal=None, signal_time=None, signal_price=None, show_fibonacci=False, show_ema=False, show_macd=False, show_vwap=False, show_ichimoku=False):
@@ -853,31 +959,44 @@ def main():
                         show_vwap=show_vwap,
                         show_ichimoku=show_ichimoku
                     )
-                    # Add a unique key for the chart
-                    placeholder_chart.plotly_chart(fig, use_container_width=True, key=f"{ticker}_chart_{int(time.time())}")
                     
+                    # Generate a unique key for each chart
+                    import uuid
+                    unique_key = f"{ticker}_chart_{uuid.uuid4().hex}"
+                    placeholder_chart.plotly_chart(fig, use_container_width=True, key=unique_key)
+
+
 
                     # Real-Time Signal Alerts
                     with placeholder_signal:
                         try:
-                            signal, signal_time, signal_price = check_trade_signal(data)
+                            # Ensure the function returns all 4 values, even if there's an error
+                            signal, signal_time, signal_price, reasoning = check_trade_signal(data)
+
                             if signal == "BUY":
-                                st.success(f"**BUY Signal detected for {ticker} at {signal_price:.2f} on {signal_time}**")
+                                st.success(
+                                    f"**BUY Signal detected for {ticker} at {signal_price:.2f} on {signal_time}**\n\n"
+                                    f"Reasoning:\n{reasoning}"
+            )
                             elif signal == "SELL":
-                                st.error(f"**SELL Signal detected for {ticker} at {signal_price:.2f} on {signal_time}**")
+                                st.error(
+                                    f"**SELL Signal detected for {ticker} at {signal_price:.2f} on {signal_time}**\n\n"
+                                    f"Reasoning:\n{reasoning}"
+            )
                             else:
-                                st.info("No signals detected.")
+                                st.info(f"No signals detected.\n\nReasoning:\n{reasoning}")
+
                         except Exception as e:
                             st.error(f"Error checking trade signals: {e}")
-                            break
 
-                    # Wait for refresh
-                    time.sleep(refresh_rate)
+
+
+            # Wait for refresh
+            time.sleep(refresh_rate)
 
 
 if __name__ == "__main__":
     main()
-
 
 
 
