@@ -1,0 +1,13 @@
+streamlit
+yfinance
+pandas
+ta
+plotly
+textblob
+numpy
+tensorflow
+transformers
+requests
+beautifulsoup4
+openai
+pytz
