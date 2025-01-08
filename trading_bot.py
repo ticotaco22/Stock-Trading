@@ -202,9 +202,9 @@ def check_trade_signal(data):
     weights = {
         "EMA": 0.3,         # 30% weight
         "VWAP": 0.25,       # 25% weight
-        "Bollinger Bands": 0.2,  # 20% weight
-        "RSI": 0.15,        # 15% weight
-        "ATR": 0.1          # 10% weight
+        "Bollinger Bands": 0.15,  # 15% weight
+        "RSI": 0.10,        # 10% weight
+        "ATR": 0.2          # 20% weight
     }
 
     # Evaluate indicators and assign scores
@@ -266,17 +266,18 @@ def check_trade_signal(data):
             f"- **RSI Momentum**: RSI ({rsi:.2f}) indicates neutral momentum (0%)."
         )
 
-    # ATR Volatility Check
+    # ATR Volatility Check (affects both Buy and Sell positively/negatively)
     if atr_threshold_low <= atr <= atr_threshold_high:
         score += weights["ATR"]
         reasoning_parts.append(
             f"- **Volatility Check (ATR)**: ATR ({atr:.2f}) is within the acceptable range "
-            f"({atr_threshold_low:.2f} - {atr_threshold_high:.2f}) (+{weights['ATR']*100:.0f}%)."
+            f"({atr_threshold_low:.2f} - {atr_threshold_high:.2f}), supporting the signal positively (+{weights['ATR']*100:.0f}%)."
         )
     else:
+        score -= weights["ATR"]
         reasoning_parts.append(
             f"- **Volatility Check (ATR)**: ATR ({atr:.2f}) is outside the acceptable range "
-            f"({atr_threshold_low:.2f} - {atr_threshold_high:.2f}) (0%)."
+            f"({atr_threshold_low:.2f} - {atr_threshold_high:.2f}), detracting from the signal (-{weights['ATR']*100:.0f}%)."
         )
 
     # Calculate final weighted score
