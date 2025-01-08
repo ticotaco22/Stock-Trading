@@ -7,9 +7,6 @@ from textblob import TextBlob
 import numpy as np
 from datetime import datetime
 import time
-import tensorflow as tf
-from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import Dense, LSTM, Dropout
 from transformers import pipeline
 import requests
 from bs4 import BeautifulSoup
@@ -18,13 +15,33 @@ import plotly.express as px
 import openai  # Ensure OpenAI API is installed and set up
 import pytz
 
+def configure_page():
+    """
+    Configures the Streamlit page to use full screen, expand the sidebar,
+    and set the zoom level to 90%.
+    """
+    # Configure the page settings
+    st.set_page_config(
+        page_title="Real-Time Stock Analysis",
+        layout="wide",  # Ensures the app takes the full screen width
+        initial_sidebar_state="expanded"  # Keeps the sidebar expanded
+    )
 
-# Configure the page to use the full screen
-st.set_page_config(
-    page_title="Real-Time Stock Analysis",
-    layout="wide",  # Ensures the app takes the full screen width
-    initial_sidebar_state="expanded"  # Keeps the sidebar expanded
-)
+    # Inject custom CSS for zoom
+    st.markdown(
+        """
+        <style>
+            body {
+                zoom: 90%; /* Set zoom to 90% */
+            }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+# Call the configure_page function at the start of the script
+configure_page()
+
 
 def fetch_data(symbol, interval="1m", period="1d"):
     """Fetch live or historical data for a single stock."""
@@ -164,15 +181,63 @@ def calculate_indicators(df):
         st.error(f"Error calculating indicators: {e}")
         return df
 
+def detect_candlestick_patterns(df):
+    """Detect multiple candlestick patterns and add them as columns to the DataFrame."""
+    df['Hammer'] = (
+        ((df['High'] - df['Low']) > 3 * (df['Open'] - df['Close'])) & 
+        ((df['Close'] - df['Low']) / (0.001 + df['High'] - df['Low']) > 0.6) & 
+        ((df['Open'] - df['Low']) / (0.001 + df['High'] - df['Low']) > 0.6)
+    )
+
+    df['Shooting Star'] = (
+        ((df['High'] - df['Low']) > 3 * (df['Open'] - df['Close'])) & 
+        ((df['High'] - df['Close']) / (0.001 + df['High'] - df['Low']) > 0.6) & 
+        ((df['High'] - df['Open']) / (0.001 + df['High'] - df['Low']) > 0.6) &
+        (df['Open'] > df['Close'])
+    )
+
+    df['Bullish Engulfing'] = (
+        (df['Open'].shift(1) > df['Close'].shift(1)) &
+        (df['Close'] > df['Open']) &
+        (df['Close'] > df['Open'].shift(1)) &
+        (df['Open'] < df['Close'].shift(1))
+    )
+
+    df['Bearish Engulfing'] = (
+        (df['Close'].shift(1) > df['Open'].shift(1)) &
+        (df['Open'] > df['Close']) &
+        (df['Open'] > df['Close'].shift(1)) &
+        (df['Close'] < df['Open'].shift(1))
+    )
+
+    df['Doji'] = (
+        abs(df['Open'] - df['Close']) <= (df['High'] - df['Low']) * 0.1
+    )
+
+    df['Morning Star'] = (
+        (df['Close'].shift(2) < df['Open'].shift(2)) &
+        (df['Close'].shift(1) > df['Open'].shift(1)) &
+        (df['Open'] < df['Close']) &
+        (df['Close'] > (df['Open'].shift(2) + df['Close'].shift(2)) / 2)
+    )
+
+    df['Evening Star'] = (
+        (df['Close'].shift(2) > df['Open'].shift(2)) &
+        (df['Close'].shift(1) < df['Open'].shift(1)) &
+        (df['Open'] > df['Close']) &
+        (df['Close'] < (df['Open'].shift(2) + df['Close'].shift(2)) / 2)
+    )
+
+    return df
 
 
 def check_trade_signal(data):
-    """Check the latest trade signal with rigorous conditions, detailed reasoning, and weighted indicators."""
+    """Check the latest trade signal with rigorous conditions, detailed reasoning, and enhanced analysis."""
     if data.empty or len(data) < 1:
         return None, None, None, "No data available to evaluate signals."
 
     # Ensure the required indicators exist
-    required_columns = ['9_EMA', '21_EMA', 'Close', 'VWAP', 'BB_Upper', 'BB_Lower', 'RSI', 'ATR']
+    required_columns = ['9_EMA', '21_EMA', 'Close', 'VWAP', 'BB_Upper', 'BB_Lower', 'RSI', 'ATR', 'High', 'Low']
     missing_columns = [col for col in required_columns if col not in data.columns]
     if missing_columns:
         return None, None, None, f"Missing required columns: {', '.join(missing_columns)}"
@@ -200,11 +265,14 @@ def check_trade_signal(data):
 
     # Define weights for indicators
     weights = {
-        "EMA": 0.3,         # 30% weight
-        "VWAP": 0.25,       # 25% weight
-        "Bollinger Bands": 0.15,  # 15% weight
-        "RSI": 0.10,        # 10% weight
-        "ATR": 0.2          # 20% weight
+        "EMA": 0.2,
+        "VWAP": 0.15,
+        "Bollinger Bands": 0.1,
+        "RSI": 0.1,
+        "ATR": 0.1,
+        "SMA": 0.2,
+        "Support/Resistance": 0.1,
+        "Candlestick Patterns": 0.15,
     }
 
     # Evaluate indicators and assign scores
@@ -216,39 +284,33 @@ def check_trade_signal(data):
     if ema_9 > ema_21:
         score += weights["EMA"]
         reasoning_parts.append(
-            f"- **Trend Confirmation**: Short-term EMA (9_EMA = {ema_9:.2f}) is above long-term EMA (21_EMA = {ema_21:.2f}), "
-            f"indicating an uptrend (+{weights['EMA']*100:.0f}%)."
+            f"- **Trend Confirmation**: Short-term EMA (9_EMA = {ema_9:.2f}) is above long-term EMA (21_EMA = {ema_21:.2f}), indicating an uptrend (+{weights['EMA']*100:.0f}%)."
         )
     else:
         reasoning_parts.append(
-            f"- **Trend Confirmation**: Short-term EMA (9_EMA = {ema_9:.2f}) is below long-term EMA (21_EMA = {ema_21:.2f}), "
-            f"indicating a downtrend (0%)."
+            f"- **Trend Confirmation**: Short-term EMA (9_EMA = {ema_9:.2f}) is below long-term EMA (21_EMA = {ema_21:.2f}), indicating a downtrend (0%)."
         )
 
     # Price Action Alignment with VWAP
     if close > vwap:
         score += weights["VWAP"]
         reasoning_parts.append(
-            f"- **Price Action Alignment with VWAP**: Close price ({close:.2f}) is above VWAP ({vwap:.2f}), "
-            f"signaling bullish sentiment (+{weights['VWAP']*100:.0f}%)."
+            f"- **Price Action Alignment with VWAP**: Close price ({close:.2f}) is above VWAP ({vwap:.2f}), signaling bullish sentiment (+{weights['VWAP']*100:.0f}%)."
         )
     else:
         reasoning_parts.append(
-            f"- **Price Action Alignment with VWAP**: Close price ({close:.2f}) is below VWAP ({vwap:.2f}), "
-            f"signaling bearish sentiment (0%)."
+            f"- **Price Action Alignment with VWAP**: Close price ({close:.2f}) is below VWAP ({vwap:.2f}), signaling bearish sentiment (0%)."
         )
 
     # Bollinger Bands Positioning
     if close > (bb_upper + bb_lower) / 2:
         score += weights["Bollinger Bands"]
         reasoning_parts.append(
-            f"- **Bollinger Band Positioning**: Close price ({close:.2f}) is in the upper half of Bollinger Bands "
-            f"(BB_Upper = {bb_upper:.2f}, BB_Lower = {bb_lower:.2f}) (+{weights['Bollinger Bands']*100:.0f}%)."
+            f"- **Bollinger Band Positioning**: Close price ({close:.2f}) is in the upper half of Bollinger Bands (BB_Upper = {bb_upper:.2f}, BB_Lower = {bb_lower:.2f}) (+{weights['Bollinger Bands']*100:.0f}%)."
         )
     else:
         reasoning_parts.append(
-            f"- **Bollinger Band Positioning**: Close price ({close:.2f}) is in the lower half of Bollinger Bands "
-            f"(BB_Upper = {bb_upper:.2f}, BB_Lower = {bb_lower:.2f}) (0%)."
+            f"- **Bollinger Band Positioning**: Close price ({close:.2f}) is in the lower half of Bollinger Bands (BB_Upper = {bb_upper:.2f}, BB_Lower = {bb_lower:.2f}) (0%)."
         )
 
     # RSI Momentum
@@ -266,19 +328,62 @@ def check_trade_signal(data):
             f"- **RSI Momentum**: RSI ({rsi:.2f}) indicates neutral momentum (0%)."
         )
 
-    # ATR Volatility Check (affects both Buy and Sell positively/negatively)
+    # ATR Volatility Check
     if atr_threshold_low <= atr <= atr_threshold_high:
         score += weights["ATR"]
         reasoning_parts.append(
-            f"- **Volatility Check (ATR)**: ATR ({atr:.2f}) is within the acceptable range "
-            f"({atr_threshold_low:.2f} - {atr_threshold_high:.2f}), supporting the signal positively (+{weights['ATR']*100:.0f}%)."
+            f"- **Volatility Check (ATR)**: ATR ({atr:.2f}) is within the acceptable range ({atr_threshold_low:.2f} - {atr_threshold_high:.2f}) (+{weights['ATR']*100:.0f}%)."
         )
     else:
-        score -= weights["ATR"]
         reasoning_parts.append(
-            f"- **Volatility Check (ATR)**: ATR ({atr:.2f}) is outside the acceptable range "
-            f"({atr_threshold_low:.2f} - {atr_threshold_high:.2f}), detracting from the signal (-{weights['ATR']*100:.0f}%)."
+            f"- **Volatility Check (ATR)**: ATR ({atr:.2f}) is outside the acceptable range ({atr_threshold_low:.2f} - {atr_threshold_high:.2f}) (0%)."
         )
+
+    # Simple Moving Average (SMA)
+    sma_50 = data['Close'].rolling(window=50).mean().iloc[-1]
+    if close > sma_50:
+        score += weights["SMA"]
+        reasoning_parts.append(
+            f"- **Simple Moving Average (SMA)**: Close price ({close:.2f}) is above the 50-period SMA ({sma_50:.2f}), indicating bullish momentum (+{weights['SMA']*100:.0f}%)."
+        )
+    else:
+        reasoning_parts.append(
+            f"- **Simple Moving Average (SMA)**: Close price ({close:.2f}) is below the 50-period SMA ({sma_50:.2f}), indicating bearish momentum (0%)."
+        )
+
+    # Support and Resistance Levels
+    recent_highs = data['High'].tail(20).max()
+    recent_lows = data['Low'].tail(20).min()
+    if close > recent_highs:
+        score += weights["Support/Resistance"]
+        reasoning_parts.append(
+            f"- **Support and Resistance**: Close price ({close:.2f}) is breaking above recent resistance ({recent_highs:.2f}) (+{weights['Support/Resistance']*100:.0f}%)."
+        )
+    elif close < recent_lows:
+        reasoning_parts.append(
+            f"- **Support and Resistance**: Close price ({close:.2f}) is breaking below recent support ({recent_lows:.2f}), signaling bearish sentiment (0%)."
+        )
+    else:
+        reasoning_parts.append(
+            f"- **Support and Resistance**: Close price ({close:.2f}) is within the support ({recent_lows:.2f}) and resistance ({recent_highs:.2f}) range (0%)."
+        )
+
+    # Candlestick Patterns
+    patterns = {
+        "Hammer": row.get('Hammer', False),
+        "Shooting Star": row.get('Shooting Star', False),
+        "Bullish Engulfing": row.get('Bullish Engulfing', False),
+        "Bearish Engulfing": row.get('Bearish Engulfing', False),
+        "Doji": row.get('Doji', False),
+        "Morning Star": row.get('Morning Star', False),
+        "Evening Star": row.get('Evening Star', False),
+    }
+    
+    for pattern, detected in patterns.items():
+        if detected:
+            score += weights["Candlestick Patterns"]
+            reasoning_parts.append(f"- **Candlestick Pattern Detected**: {pattern} indicates potential trend reversal (+{weights['Candlestick Patterns']*100:.0f}%).")
+
 
     # Calculate final weighted score
     weighted_score = score / total_weight  # Normalize score to a 0-1 range
@@ -293,7 +398,6 @@ def check_trade_signal(data):
     else:
         reasoning = "No signal generated because the overall weighted score did not meet the thresholds:\n" + "\n".join(reasoning_parts)
         return None, None, None, reasoning
-
 
 
 
@@ -332,12 +436,26 @@ def display_ticker_analysis():
 
 
 
-def plot_interactive_chart(ticker, data, signal=None, signal_time=None, signal_price=None, show_fibonacci=False, show_ema=False, show_macd=False, show_vwap=False, show_ichimoku=False):
+def plot_interactive_chart(
+    ticker, 
+    data, 
+    signal=None, 
+    signal_time=None, 
+    signal_price=None, 
+    show_fibonacci=False, 
+    show_ema=False, 
+    show_macd=False, 
+    show_vwap=False, 
+    show_ichimoku=False, 
+    show_bollinger=False, 
+    show_sma=False, 
+    show_support_resistance=False, 
+    show_candlestick_patterns=False
+):
     """
     Plot an interactive chart with Plotly, with optional indicators and buy/sell signals.
     """
     import plotly.graph_objects as go
-    import pytz
 
     market_tz = pytz.timezone("US/Eastern")
 
@@ -400,14 +518,38 @@ def plot_interactive_chart(ticker, data, signal=None, signal_time=None, signal_p
             mode='lines', name='VWAP', line=dict(color='gold')
         ))
 
+    # Add Bollinger Bands
+    if show_bollinger and 'BB_Upper' in data.columns and 'BB_Lower' in data.columns:
+        fig.add_trace(go.Scatter(
+            x=data['Datetime'], y=data['BB_Upper'], 
+            mode='lines', name='BB Upper', line=dict(color='orange', dash='dot')
+        ))
+        fig.add_trace(go.Scatter(
+            x=data['Datetime'], y=data['BB_Lower'], 
+            mode='lines', name='BB Lower', line=dict(color='orange', dash='dot')
+        ))
+
+    # Add SMA
+    if show_sma:
+        sma_50 = data['Close'].rolling(window=50).mean()
+        fig.add_trace(go.Scatter(
+            x=data['Datetime'], y=sma_50, 
+            mode='lines', name='50 SMA', line=dict(color='pink', dash='dash')
+        ))
+
+    # Add Support and Resistance Levels
+    if show_support_resistance:
+        recent_highs = data['High'].rolling(window=20).max().iloc[-1]
+        recent_lows = data['Low'].rolling(window=20).min().iloc[-1]
+        fig.add_hline(y=recent_highs, line_dash="dash", line_color="green", annotation_text="Resistance")
+        fig.add_hline(y=recent_lows, line_dash="dash", line_color="red", annotation_text="Support")
+
     # Add Fibonacci retracements
     if show_fibonacci:
         fibonacci_levels = calculate_fibonacci_retracements(data)
         for level, value in fibonacci_levels.items():
-            # Ensure `value` is scalar
             if isinstance(value, pd.Series):
                 value = value.iloc[0]  # Convert Series to scalar if needed
-
             fig.add_hline(
                 y=value,
                 line_dash="dash",
@@ -435,6 +577,23 @@ def plot_interactive_chart(ticker, data, signal=None, signal_time=None, signal_p
                 mode='lines', name='Leading Span B', line=dict(color='red')
             ))
 
+    # Highlight Candlestick Patterns
+    if show_candlestick_patterns:
+        patterns = ['Hammer', 'Shooting Star', 'Bullish Engulfing', 'Bearish Engulfing', 'Doji', 'Morning Star', 'Evening Star']
+        for pattern in patterns:
+            if pattern in data.columns:
+                pattern_indices = data.index[data[pattern] == True]
+                for idx in pattern_indices:
+                    fig.add_annotation(
+                        x=data.loc[idx, 'Datetime'],
+                        y=data.loc[idx, 'High'] if pattern != 'Shooting Star' else data.loc[idx, 'Low'],
+                        text=pattern,
+                        showarrow=True,
+                        arrowhead=1,
+                        arrowcolor='blue',
+                        font=dict(size=10, color="blue")
+                    )
+
     # Customize layout
     fig.update_layout(
         title=f"{ticker} - Real-Time Chart",
@@ -455,9 +614,6 @@ def plot_dynamic_chart(ticker, interval, refresh_rate, show_fibonacci, show_ema,
     placeholder_signal = st.empty()
     placeholder_chart = st.empty()
 
-    # Static elements (sentiment, sector performance, etc.)
-    sentiment = display_google_news_sentiment(ticker)
-    st.metric(label="Sentiment", value=sentiment)
 
     while True:
         # Fetch Data
@@ -494,115 +650,6 @@ def plot_dynamic_chart(ticker, interval, refresh_rate, show_fibonacci, show_ema,
 
         # Wait for refresh
         time.sleep(refresh_rate)
-
-# Load FinBERT model and tokenizer
-finbert_model = AutoModelForSequenceClassification.from_pretrained("yiyanghkust/finbert-tone")
-finbert_tokenizer = AutoTokenizer.from_pretrained("yiyanghkust/finbert-tone")
-finbert_pipeline = pipeline("sentiment-analysis", model=finbert_model, tokenizer=finbert_tokenizer)
-
-# Step 1: Scrape Google News
-def fetch_google_news_articles(ticker):
-    """Fetch Google News headlines and links for a specific ticker."""
-    try:
-        # Google News search URL
-        url = f"https://www.google.com/search?q={ticker}+stock+news&tbm=nws"
-        headers = {'User-Agent': 'Mozilla/5.0'}
-        response = requests.get(url, headers=headers)
-        soup = BeautifulSoup(response.text, 'html.parser')
-
-        # Extract article titles and links
-        articles = []
-        for item in soup.find_all('div', class_='BNeawe vvjwJb AP7Wnd'):
-            title = item.text
-            parent = item.find_parent('a')
-            link = parent['href'] if parent else None
-            if link:
-                articles.append({'title': title, 'link': link})
-        return articles[:5]  # Limit to top 5 articles
-    except Exception as e:
-        print(f"Error fetching Google News: {e}")
-        return []
-
-# Step 2: Fetch Article Content
-def fetch_article_content(link):
-    """Fetch the content of an article given its link."""
-    try:
-        headers = {'User-Agent': 'Mozilla/5.0'}
-        response = requests.get(link, headers=headers)
-        soup = BeautifulSoup(response.text, 'html.parser')
-
-        # Extract content (this depends on the article's structure)
-        paragraphs = soup.find_all('p')
-        content = ' '.join([p.text for p in paragraphs])
-        return content.strip()
-    except Exception as e:
-        print(f"Error fetching article content: {e}")
-        return "No content available."
-
-# Step 3: Analyze Sentiment with FinBERT
-def analyze_articles_with_sentiment(articles):
-    """Perform sentiment analysis on article titles and content."""
-    results = []
-    sentiment_scores = {"Positive": 0, "Negative": 0, "Neutral": 0}
-    for article in articles:
-        title = article['title']
-        link = article['link']
-
-        # Fetch article content
-        content = fetch_article_content(link)
-
-        # Combine title and content for sentiment analysis
-        text_to_analyze = f"{title}. {content}"
-        sentiment_result = finbert_pipeline([text_to_analyze])[0]
-
-        # Update sentiment counts
-        sentiment_scores[sentiment_result['label'].capitalize()] += 1
-
-        # Append the results
-        results.append({
-            'title': title,
-            'link': link,
-            'content': content,
-            'sentiment': sentiment_result['label'].capitalize(),
-            'confidence': sentiment_result['score']
-        })
-
-    # Aggregate sentiment score
-    total_articles = len(articles)
-    aggregate_score = (
-        (sentiment_scores["Positive"] - sentiment_scores["Negative"]) / total_articles
-        if total_articles > 0 else 0
-    )
-
-    return results, aggregate_score
-
-# Step 4: Display Results in Streamlit
-def display_google_news_sentiment(ticker):
-    """Display Google News sentiment analysis for the selected ticker."""
-    articles = fetch_google_news_articles(ticker)
-    if not articles:
-        st.warning("No news articles found.")
-        return
-
-    # Perform sentiment analysis
-    analyzed_articles, aggregate_score = analyze_articles_with_sentiment(articles)
-
-    # Display aggregate sentiment
-    st.subheader(f"Aggregate Sentiment for {ticker}")
-    if aggregate_score > 0:
-        st.success(f"Overall Sentiment: Positive (Score: {aggregate_score:.2f})")
-    elif aggregate_score < 0:
-        st.error(f"Overall Sentiment: Negative (Score: {aggregate_score:.2f})")
-    else:
-        st.info(f"Overall Sentiment: Neutral (Score: {aggregate_score:.2f})")
-
-    # Display individual article results
-    st.subheader(f"News Sentiment Details for {ticker}")
-    for article in analyzed_articles:
-        st.write(f"**Title:** {article['title']}")
-        st.write(f"**Link:** [Read full article]({article['link']})")
-        st.write(f"**Sentiment:** {article['sentiment']} (Confidence: {article['confidence']:.2f})")
-        st.write("---")
 
 
 
@@ -741,162 +788,6 @@ def generate_ai_response(user_input):
     except Exception as e:
         return f"An error occurred: {e}"
 
-def detect_candlestick_patterns(df):
-    """Manually calculate multiple candlestick patterns."""
-    df['Hammer'] = (
-        ((df['High'] - df['Low']) > 3 * (df['Open'] - df['Close'])) &
-        ((df['Close'] - df['Low']) / (0.001 + df['High'] - df['Low']) > 0.6) &
-        ((df['Open'] - df['Low']) / (0.001 + df['High'] - df['Low']) > 0.6)
-    )
-    
-    df['Bullish Engulfing'] = (
-        (df['Open'].shift(1) > df['Close'].shift(1)) &
-        (df['Close'] > df['Open']) &
-        (df['Close'] > df['Open'].shift(1)) &
-        (df['Open'] < df['Close'].shift(1))
-    )
-    
-    df['Bearish Engulfing'] = (
-        (df['Close'].shift(1) > df['Open'].shift(1)) &
-        (df['Open'] > df['Close']) &
-        (df['Open'] > df['Close'].shift(1)) &
-        (df['Close'] < df['Open'].shift(1))
-    )
-    
-    df['Doji'] = (
-        abs(df['Open'] - df['Close']) <= (df['High'] - df['Low']) * 0.1
-    )
-    
-    df['Morning Star'] = (
-        (df['Close'].shift(2) < df['Open'].shift(2)) &
-        (df['Close'].shift(1) > df['Open'].shift(1)) &
-        (df['Open'] < df['Close']) &
-        (df['Close'] > (df['Open'].shift(2) + df['Close'].shift(2)) / 2)
-    )
-    
-    df['Evening Star'] = (
-        (df['Close'].shift(2) > df['Open'].shift(2)) &
-        (df['Close'].shift(1) < df['Open'].shift(1)) &
-        (df['Open'] > df['Close']) &
-        (df['Close'] < (df['Open'].shift(2) + df['Close'].shift(2)) / 2)
-    )
-    
-    df['Hanging Man'] = (
-        ((df['High'] - df['Low']) > 3 * (df['Open'] - df['Close'])) &
-        ((df['Close'] - df['Low']) / (0.001 + df['High'] - df['Low']) > 0.6) &
-        ((df['Open'] - df['Low']) / (0.001 + df['High'] - df['Low']) > 0.6) &
-        (df['Close'] < df['Open'])  # Bearish body
-    )
-    
-    df['Shooting Star'] = (
-        ((df['High'] - df['Low']) > 3 * (df['Open'] - df['Close'])) &
-        ((df['High'] - df['Close']) / (0.001 + df['High'] - df['Low']) > 0.6) &
-        ((df['High'] - df['Open']) / (0.001 + df['High'] - df['Low']) > 0.6) &
-        (df['Open'] > df['Close'])  # Bearish body
-    )
-
-    return df
-
-def generate_recommendations(df):
-    """Generate Buy/Sell recommendations based on candlestick patterns."""
-    recommendations = []
-
-    for index, row in df.iterrows():
-        if row['Bullish Engulfing'] or row['Hammer'] or row['Morning Star']:
-            recommendations.append({'Date': row['Datetime'], 'Action': 'Buy', 'Pattern': 'Bullish'})
-        elif row['Bearish Engulfing'] or row['Hanging Man'] or row['Shooting Star'] or row['Evening Star']:
-            recommendations.append({'Date': row['Datetime'], 'Action': 'Sell', 'Pattern': 'Bearish'})
-
-    recommendations_df = pd.DataFrame(recommendations)
-
-    # Format the 'Date' column to a more readable format (e.g., Jan 6, 2025, 03:15 PM)
-    if not recommendations_df.empty:
-        recommendations_df['Date'] = recommendations_df['Date'].dt.strftime("%b %d, %Y %I:%M %p")
-
-    return recommendations_df
-
-
-
-def plot_candlestick_with_recommendations(df, recommendations):
-    """Plot candlestick chart with Buy/Sell recommendations."""
-    fig = go.Figure()
-
-    # Add candlestick chart
-    fig.add_trace(go.Candlestick(
-        x=df['Datetime'],
-        open=df['Open'],
-        high=df['High'],
-        low=df['Low'],
-        close=df['Close'],
-        name='Candlestick'
-    ))
-
-    # Add Buy markers
-    buy_signals = recommendations[recommendations['Action'] == 'Buy']
-    fig.add_trace(go.Scatter(
-        x=buy_signals['Date'],
-        y=df.loc[df['Datetime'].isin(buy_signals['Date']), 'Close'],
-        mode='markers+text',
-        name='Buy Signal',
-        marker=dict(color='green', size=10),
-        text=buy_signals['Pattern'],
-        textposition='top center'
-    ))
-
-    # Add Sell markers
-    sell_signals = recommendations[recommendations['Action'] == 'Sell']
-    fig.add_trace(go.Scatter(
-        x=sell_signals['Date'],
-        y=df.loc[df['Datetime'].isin(sell_signals['Date']), 'Close'],
-        mode='markers+text',
-        name='Sell Signal',
-        marker=dict(color='red', size=10),
-        text=sell_signals['Pattern'],
-        textposition='top center'
-    ))
-
-    fig.update_layout(
-        title="Candlestick Patterns with Buy/Sell Recommendations",
-        xaxis_title="Date",
-        yaxis_title="Price",
-        template="plotly_white"
-    )
-    return fig
-
-def pattern_recognition_tab():
-    """Tab for candlestick pattern recognition with recommendations."""
-    st.header("Candlestick Pattern Recognition with Buy/Sell Recommendations")
-
-    # Input for ticker search
-    ticker = st.text_input("Enter Ticker Symbol (e.g., AAPL):", value="AAPL")
-    interval = st.selectbox("Interval", ["15m", "30m", "1h", "3h", "6h"], index=2)  # Updated intervals
-    period = st.selectbox("Period", ["1d", "5d", "1mo"], index=1)  # Adjusted for intraday data
-
-    if ticker:
-        # Fetch data for the entered ticker
-        df = fetch_data(ticker, interval=interval, period=period)
-        if not df.empty:
-            # Detect patterns
-            df = detect_candlestick_patterns(df)
-
-            # Generate recommendations
-            recommendations = generate_recommendations(df)
-
-            # Plot chart with recommendations
-            fig = plot_candlestick_with_recommendations(df, recommendations)
-            st.plotly_chart(fig)
-
-            # Display recommendations in a table
-            st.write("Buy/Sell Recommendations")
-            if not recommendations.empty:
-                st.dataframe(recommendations)
-            else:
-                st.info("No Buy/Sell patterns detected for the selected ticker.")
-        else:
-            st.error("No data available for the selected ticker and time period.")
-    else:
-        st.warning("Please enter a valid ticker symbol.")
-
 
 # Main Streamlit Application
 def main():
@@ -915,6 +806,10 @@ def main():
     show_ichimoku = st.sidebar.checkbox("Show Ichimoku Clouds", value=True)
     show_ema = st.sidebar.checkbox("Show EMA Indicators", value=True)
     show_vwap = st.sidebar.checkbox("Show VWAP", value=True)
+    show_bollinger = st.sidebar.checkbox("Show Bollinger Bands", value=True)
+    show_sma = st.sidebar.checkbox("Show Simple Moving Average (SMA)", value=True)
+    show_support_resistance = st.sidebar.checkbox("Show Support/Resistance Levels", value=True)
+    show_candlestick_patterns = st.sidebar.checkbox("Show Candlestick Patterns", value=True)
 
     # Define analysis type tabs
     analysis_type = st.tabs(["Trading", "AI Chatbot"])
@@ -958,13 +853,18 @@ def main():
                         show_fibonacci=show_fibonacci,
                         show_ema=show_ema,
                         show_vwap=show_vwap,
-                        show_ichimoku=show_ichimoku
+                        show_ichimoku=show_ichimoku,
+                        show_bollinger=show_bollinger,
+                        show_sma=show_sma,
+                        show_support_resistance=show_support_resistance,
+                        show_candlestick_patterns=show_candlestick_patterns
                     )
                     
                     # Generate a unique key for each chart
                     import uuid
                     unique_key = f"{ticker}_chart_{uuid.uuid4().hex}"
                     placeholder_chart.plotly_chart(fig, use_container_width=True, key=unique_key)
+
 
 
 
@@ -998,8 +898,6 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
 
 
 
