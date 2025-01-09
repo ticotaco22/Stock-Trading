@@ -487,17 +487,6 @@ def check_trade_signal(data):
             f"- **Volatility Check (ATR)**: ATR ({atr:.2f}) is outside the acceptable range ({atr_threshold_low:.2f} - {atr_threshold_high:.2f}) (0%)."
         )
 
-    # Simple Moving Average (SMA)
-    sma_50 = data['Close'].rolling(window=50).mean().iloc[-1]
-    if close > sma_50:
-        score += weights["SMA"]
-        reasoning_parts.append(
-            f"- **Simple Moving Average (SMA)**: Close price ({close:.2f}) is above the 50-period SMA ({sma_50:.2f}), indicating bullish momentum (+{weights['SMA']*100:.0f}%)."
-        )
-    else:
-        reasoning_parts.append(
-            f"- **Simple Moving Average (SMA)**: Close price ({close:.2f}) is below the 50-period SMA ({sma_50:.2f}), indicating bearish momentum (0%)."
-        )
 
     # Support and Resistance Levels
     if close > resistance:
@@ -562,7 +551,6 @@ def plot_interactive_chart(
     show_vwap=False, 
     show_ichimoku=False, 
     show_bollinger=False, 
-    show_sma=False, 
     show_candlestick_patterns=False,
     show_support=False,  
     show_resistance=False  
@@ -644,13 +632,6 @@ def plot_interactive_chart(
             mode='lines', name='BB Lower', line=dict(color='orange', dash='dot')
         ))
 
-    # Add SMA
-    if show_sma:
-        sma_50 = data['Close'].rolling(window=50).mean()
-        fig.add_trace(go.Scatter(
-            x=data['Datetime'], y=sma_50, 
-            mode='lines', name='50 SMA', line=dict(color='pink', dash='dash')
-        ))
 
     # Add support and resistance lines
     if show_support or show_resistance:
@@ -871,7 +852,6 @@ def main():
     show_ema = st.sidebar.checkbox("Show EMA Indicators", value=True)
     show_vwap = st.sidebar.checkbox("Show VWAP", value=True)
     show_bollinger = st.sidebar.checkbox("Show Bollinger Bands", value=True)
-    show_sma = st.sidebar.checkbox("Show Simple Moving Average (SMA)", value=True)
     show_support_resistance = st.sidebar.checkbox("Show Support/Resistance Levels", value=True)
     show_candlestick_patterns = st.sidebar.checkbox("Show Candlestick Patterns", value=True)
 
@@ -952,7 +932,6 @@ def main():
                             show_vwap=show_vwap,
                             show_ichimoku=show_ichimoku,
                             show_bollinger=show_bollinger,
-                            show_sma=show_sma,
                             show_support=True,  # Enable support line
                             show_resistance=True,  # Enable resistance line
                             )
@@ -969,6 +948,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
