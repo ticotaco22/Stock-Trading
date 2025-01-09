@@ -12,4 +12,4 @@ beautifulsoup4
 openai
 pytz
 torch  # Add PyTorch
-
+matplotlib
