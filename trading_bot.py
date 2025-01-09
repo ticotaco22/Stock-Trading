@@ -405,11 +405,10 @@ def check_trade_signal(data):
     weights = {
         "EMA": 0.2,
         "VWAP": 0.15,
-        "Bollinger Bands": 0.1,
-        "RSI": 0.1,
-        "ATR": 0.1,
-        "SMA": 0.2,
-        "Support/Resistance": 0.1,
+        "Bollinger Bands": 0.05,
+        "RSI": 0.2,
+        "ATR": 0.2,
+        "Support/Resistance": 0.05,
         "Candlestick Patterns": 0.15,
     }
 
