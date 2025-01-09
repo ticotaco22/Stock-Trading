@@ -14,6 +14,7 @@ from transformers import AutoTokenizer, AutoModelForSequenceClassification, pipe
 import plotly.express as px
 import openai  # Ensure OpenAI API is installed and set up
 import pytz
+import matplotlib.pyplot as plt
 
 def configure_page():
     """
@@ -43,7 +44,7 @@ def configure_page():
 configure_page()
 
 
-def fetch_data(symbol, interval="1m", period="1d"):
+def fetch_data(symbol, interval="1m", period="3mo"):
     """Fetch live or historical data for a single stock."""
     try:
         # Download data
@@ -84,6 +85,7 @@ def fetch_data(symbol, interval="1m", period="1d"):
     except Exception as e:
         st.warning(f"Error fetching data for {symbol}: {e}")
         return pd.DataFrame()
+    
     
 def fetch_premarket_data(symbol, interval="1m", period="1d"):
     """Fetch pre/post-market data by using extended data logic."""
@@ -181,54 +183,190 @@ def calculate_indicators(df):
         st.error(f"Error calculating indicators: {e}")
         return df
 
-def detect_candlestick_patterns(df):
-    """Detect multiple candlestick patterns and add them as columns to the DataFrame."""
-    df['Hammer'] = (
-        ((df['High'] - df['Low']) > 3 * (df['Open'] - df['Close'])) & 
-        ((df['Close'] - df['Low']) / (0.001 + df['High'] - df['Low']) > 0.6) & 
-        ((df['Open'] - df['Low']) / (0.001 + df['High'] - df['Low']) > 0.6)
+
+
+
+def detect_candlestick_patterns(row, prev_row1, prev_row2):
+    """Detect multiple candlestick patterns for a given row and previous rows."""
+    patterns_detected = []
+
+    # Hammer
+    if ((row['High'] - row['Low']) > 3 * (row['Open'] - row['Close'])) and \
+       ((row['Close'] - row['Low']) / (0.001 + row['High'] - row['Low']) > 0.6) and \
+       ((row['Open'] - row['Low']) / (0.001 + row['High'] - row['Low']) > 0.6):
+        patterns_detected.append("Hammer")
+
+    # Shooting Star
+    if ((row['High'] - row['Low']) > 3 * (row['Open'] - row['Close'])) and \
+       ((row['High'] - row['Close']) / (0.001 + row['High'] - row['Low']) > 0.6) and \
+       ((row['High'] - row['Open']) / (0.001 + row['High'] - row['Low']) > 0.6) and \
+       (row['Open'] > row['Close']):
+        patterns_detected.append("Shooting Star")
+
+    # Bullish Engulfing
+    if prev_row1 is not None and \
+       (prev_row1['Open'] > prev_row1['Close']) and \
+       (row['Close'] > row['Open']) and \
+       (row['Close'] > prev_row1['Open']) and \
+       (row['Open'] < prev_row1['Close']):
+        patterns_detected.append("Bullish Engulfing")
+
+    # Bearish Engulfing
+    if prev_row1 is not None and \
+       (prev_row1['Close'] > prev_row1['Open']) and \
+       (row['Open'] > row['Close']) and \
+       (row['Open'] > prev_row1['Close']) and \
+       (row['Close'] < prev_row1['Open']):
+        patterns_detected.append("Bearish Engulfing")
+
+    # Doji
+    if abs(row['Open'] - row['Close']) <= (row['High'] - row['Low']) * 0.1:
+        patterns_detected.append("Doji")
+
+    # Morning Star
+    if prev_row2 is not None and \
+       prev_row1 is not None and \
+       (prev_row2['Close'] < prev_row2['Open']) and \
+       (prev_row1['Close'] > prev_row1['Open']) and \
+       (row['Open'] < row['Close']) and \
+       (row['Close'] > (prev_row2['Open'] + prev_row2['Close']) / 2):
+        patterns_detected.append("Morning Star")
+
+    # Evening Star
+    if prev_row2 is not None and \
+       prev_row1 is not None and \
+       (prev_row2['Close'] > prev_row2['Open']) and \
+       (prev_row1['Close'] < prev_row1['Open']) and \
+       (row['Open'] > row['Close']) and \
+       (row['Close'] < (prev_row2['Open'] + prev_row2['Close']) / 2):
+        patterns_detected.append("Evening Star")
+
+    return patterns_detected
+
+
+def calculate_market_profile(data, bins=20):
+    """
+    Calculate market profile (volume profile) to identify support and resistance zones.
+    """
+    if data.empty or 'High' not in data.columns or 'Low' not in data.columns or 'Volume' not in data.columns:
+        raise ValueError("Data must contain 'High', 'Low', and 'Volume' columns.")
+
+    # Calculate typical price levels (midpoint between High and Low)
+    typical_prices = (data['High'] + data['Low']) / 2
+
+    # Group volumes into bins based on price levels
+    hist, bin_edges = np.histogram(typical_prices, bins=bins, weights=data['Volume'])
+
+    # Identify High Volume Nodes (HVNs) and Low Volume Nodes (LVNs)
+    high_volume_threshold = np.percentile(hist, 75)  # Top 25% of volumes
+    low_volume_threshold = np.percentile(hist, 25)  # Bottom 25% of volumes
+
+    # Correctly map volume bins back to price levels
+    high_volume_indices = np.where(hist >= high_volume_threshold)[0]
+    low_volume_indices = np.where(hist <= low_volume_threshold)[0]
+
+    high_volume_nodes = bin_edges[high_volume_indices] if len(high_volume_indices) > 0 else []
+    low_volume_nodes = bin_edges[low_volume_indices] if len(low_volume_indices) > 0 else []
+
+    # Use the highest HVN as resistance and lowest HVN as support
+    resistance = max(high_volume_nodes) if len(high_volume_nodes) > 0 else None
+    support = min(high_volume_nodes) if len(high_volume_nodes) > 0 else None
+
+    return support, resistance
+
+def integrate_market_profile(data):
+    """
+    Integrate Market Profile into support and resistance calculation.
+    """
+    hvns, lvns = calculate_market_profile(data, bins=20)
+
+    # Use the highest HVN as resistance and lowest HVN as support
+    resistance = max(hvns) if len(hvns) > 0 else None
+    support = min(hvns) if len(hvns) > 0 else None
+
+    return support, resistance
+ 
+
+
+def detect_patterns(data):
+    """
+    Detect patterns in the data.
+    """
+    data['Double_Top'] = detect_double_top(data)
+    data['Double_Bottom'] = detect_double_bottom(data)
+    data['Gap_and_Go'] = detect_gap_and_go(data)
+    data['Gap_Fill'] = detect_gap_fill(data)
+    return data
+
+
+# Pattern Detection Functions
+
+def detect_double_top(data):
+    return (
+        (data['High'] == data['High'].shift(1))
+        & (data['High'].shift(-1) == data['High'])
     )
 
-    df['Shooting Star'] = (
-        ((df['High'] - df['Low']) > 3 * (df['Open'] - df['Close'])) & 
-        ((df['High'] - df['Close']) / (0.001 + df['High'] - df['Low']) > 0.6) & 
-        ((df['High'] - df['Open']) / (0.001 + df['High'] - df['Low']) > 0.6) &
-        (df['Open'] > df['Close'])
+
+def detect_double_bottom(data):
+    return (
+        (data['Low'] == data['Low'].shift(1))
+        & (data['Low'].shift(-1) == data['Low'])
     )
 
-    df['Bullish Engulfing'] = (
-        (df['Open'].shift(1) > df['Close'].shift(1)) &
-        (df['Close'] > df['Open']) &
-        (df['Close'] > df['Open'].shift(1)) &
-        (df['Open'] < df['Close'].shift(1))
+
+def detect_ascending_triangle(data):
+    return (
+        (data['High'] == data['High'].rolling(window=5).max())
+        & (data['Low'] > data['Low'].shift(1))
     )
 
-    df['Bearish Engulfing'] = (
-        (df['Close'].shift(1) > df['Open'].shift(1)) &
-        (df['Open'] > df['Close']) &
-        (df['Open'] > df['Close'].shift(1)) &
-        (df['Close'] < df['Open'].shift(1))
+
+def detect_descending_triangle(data):
+    return (
+        (data['Low'] == data['Low'].rolling(window=5).min())
+        & (data['High'] < data['High'].shift(1))
     )
 
-    df['Doji'] = (
-        abs(df['Open'] - df['Close']) <= (df['High'] - df['Low']) * 0.1
-    )
 
-    df['Morning Star'] = (
-        (df['Close'].shift(2) < df['Open'].shift(2)) &
-        (df['Close'].shift(1) > df['Open'].shift(1)) &
-        (df['Open'] < df['Close']) &
-        (df['Close'] > (df['Open'].shift(2) + df['Close'].shift(2)) / 2)
-    )
 
-    df['Evening Star'] = (
-        (df['Close'].shift(2) > df['Open'].shift(2)) &
-        (df['Close'].shift(1) < df['Open'].shift(1)) &
-        (df['Open'] > df['Close']) &
-        (df['Close'] < (df['Open'].shift(2) + df['Close'].shift(2)) / 2)
-    )
+def detect_gap_and_go(data):
+    return (data['Open'] > data['Close'].shift(1)) & (data['Close'] > data['Open'])
 
-    return df
+
+def detect_gap_fill(data):
+    return (data['Open'] > data['Close'].shift(1)) & (data['Close'] < data['Open'])
+
+
+def generate_trade_recommendations(data):
+    """
+    Generate trade recommendations based on patterns and indicators.
+    """
+    last_row = data.iloc[-1]
+    recommendations = []
+
+
+    # Recommendations for Double Top
+    if last_row.get('Double_Top') and last_row['RSI'] > 70:
+        recommendations.append(("SELL", last_row['Close'], "Double Top with RSI Overbought"))
+
+    # Recommendations for Double Bottom
+    if last_row.get('Double_Bottom') and last_row['RSI'] < 30:
+        recommendations.append(("BUY", last_row['Close'], "Double Bottom with RSI Oversold"))
+
+
+    # Recommendations for Gap and Go
+    if last_row.get('Gap_and_Go') and last_row['Close'] > last_row['Open']:
+        recommendations.append(("BUY", last_row['Close'], "Gap and Go Pattern"))
+
+    # Recommendations for Gap Fill
+    if last_row.get('Gap_Fill') and last_row['Close'] < last_row['Open']:
+        recommendations.append(("SELL", last_row['Close'], "Gap Fill Pattern"))
+
+    if recommendations:
+        return recommendations[0]  # Return the first signal
+    return None, None, "No trade signals detected"
+
 
 
 def check_trade_signal(data):
@@ -280,7 +418,18 @@ def check_trade_signal(data):
     total_weight = sum(weights.values())
     reasoning_parts = []
 
-    # Trend Confirmation (EMA)
+
+    # Calculate support and resistance levels using Market Profile
+    try:
+        support, resistance = calculate_market_profile(data)
+    except Exception as e:
+        return None, None, None, f"Error calculating support and resistance: {e}"
+
+    # Handle None values safely in further checks
+    if support is None or resistance is None:
+        return None, None, None, "Support or resistance could not be determined."
+
+     # Trend Confirmation (EMA)
     if ema_9 > ema_21:
         score += weights["EMA"]
         reasoning_parts.append(
@@ -352,23 +501,22 @@ def check_trade_signal(data):
         )
 
     # Support and Resistance Levels
-    recent_highs = data['High'].tail(20).max()
-    recent_lows = data['Low'].tail(20).min()
-    if close > recent_highs:
+    if close > resistance:
         score += weights["Support/Resistance"]
         reasoning_parts.append(
-            f"- **Support and Resistance**: Close price ({close:.2f}) is breaking above recent resistance ({recent_highs:.2f}) (+{weights['Support/Resistance']*100:.0f}%)."
+            f"- **Support/Resistance**: Close price ({close:.2f}) is breaking above resistance ({resistance:.2f}) (+{weights['Support/Resistance']*100:.0f}%)."
         )
-    elif close < recent_lows:
+    elif close < support:
+        score -= weights["Support/Resistance"]
         reasoning_parts.append(
-            f"- **Support and Resistance**: Close price ({close:.2f}) is breaking below recent support ({recent_lows:.2f}), signaling bearish sentiment (0%)."
+            f"- **Support/Resistance**: Close price ({close:.2f}) is breaking below support ({support:.2f}) (-{weights['Support/Resistance']*100:.0f}%)."
         )
     else:
         reasoning_parts.append(
-            f"- **Support and Resistance**: Close price ({close:.2f}) is within the support ({recent_lows:.2f}) and resistance ({recent_highs:.2f}) range (0%)."
+            f"- **Support/Resistance**: Close price ({close:.2f}) is within support ({support:.2f}) and resistance ({resistance:.2f}) range (0%)."
         )
-
-    # Candlestick Patterns
+        
+        # Candlestick Patterns
     patterns = {
         "Hammer": row.get('Hammer', False),
         "Shooting Star": row.get('Shooting Star', False),
@@ -383,6 +531,7 @@ def check_trade_signal(data):
         if detected:
             score += weights["Candlestick Patterns"]
             reasoning_parts.append(f"- **Candlestick Pattern Detected**: {pattern} indicates potential trend reversal (+{weights['Candlestick Patterns']*100:.0f}%).")
+
 
 
     # Calculate final weighted score
@@ -401,40 +550,6 @@ def check_trade_signal(data):
 
 
 
-def display_ticker_analysis():
-    st.title("Ticker Analysis")
-
-    # Sidebar for user input
-    tickers_input = st.sidebar.text_area(
-        "Enter Tickers (comma-separated, e.g., AAPL, MSFT, TSLA)",
-        value="AAPL, MSFT, TSLA"
-    )
-    interval = st.sidebar.selectbox("Interval", ["1m", "5m", "15m", "1h", "1d"], index=1)
-    period = st.sidebar.selectbox("Period", ["1d", "5d", "1mo", "3mo", "6mo", "1y"], index=1)
-
-    # Process tickers
-    if tickers_input:
-        tickers = [ticker.strip().upper() for ticker in tickers_input.split(",")]
-        for ticker in tickers:
-            st.subheader(f"Analysis for {ticker}")
-            data = fetch_data(ticker, interval=interval, period=period)
-
-            if not data.empty:
-                # Calculate indicators
-                data = calculate_indicators(data)
-                st.write(f"Latest Data for {ticker}")
-                st.dataframe(data.tail(10))  # Show last 10 rows
-
-                # Check trade signal
-                # After (expecting 4 values)
-                signal, signal_time, signal_price, reasoning = check_trade_signal(data)
-
-                if signal:
-                    st.success(f"Trade Signal: {signal} at {signal_price:.2f} ({signal_time})\n\nReasoning:\n{reasoning}")
-                else:
-                    st.info(f"No trade signal detected.\n\nReasoning:\n{reasoning}")
-
-
 
 def plot_interactive_chart(
     ticker, 
@@ -449,8 +564,9 @@ def plot_interactive_chart(
     show_ichimoku=False, 
     show_bollinger=False, 
     show_sma=False, 
-    show_support_resistance=False, 
-    show_candlestick_patterns=False
+    show_candlestick_patterns=False,
+    show_support=False,  
+    show_resistance=False  
 ):
     """
     Plot an interactive chart with Plotly, with optional indicators and buy/sell signals.
@@ -537,12 +653,27 @@ def plot_interactive_chart(
             mode='lines', name='50 SMA', line=dict(color='pink', dash='dash')
         ))
 
-    # Add Support and Resistance Levels
-    if show_support_resistance:
-        recent_highs = data['High'].rolling(window=20).max().iloc[-1]
-        recent_lows = data['Low'].rolling(window=20).min().iloc[-1]
-        fig.add_hline(y=recent_highs, line_dash="dash", line_color="green", annotation_text="Resistance")
-        fig.add_hline(y=recent_lows, line_dash="dash", line_color="red", annotation_text="Support")
+    # Add support and resistance lines
+    if show_support or show_resistance:
+        support, resistance = calculate_market_profile(data)
+        if show_support and support is not None:
+            fig.add_hline(
+                y=support,
+                line_dash="dash",
+                line_color="red",
+                annotation_text=f"Support: {support:.2f}",
+                annotation_position="bottom right"
+            )
+        if show_resistance and resistance is not None:
+            fig.add_hline(
+                y=resistance,
+                line_dash="dash",
+                line_color="green",
+                annotation_text=f"Resistance: {resistance:.2f}",
+                annotation_position="top right"
+            )
+
+
 
     # Add Fibonacci retracements
     if show_fibonacci:
@@ -594,17 +725,26 @@ def plot_interactive_chart(
                         font=dict(size=10, color="blue")
                     )
 
-    # Customize layout
+    # Adjust the layout
     fig.update_layout(
-        title=f"{ticker} - Real-Time Chart",
+        title=f"{ticker} Real-Time Stock Analysis",
         xaxis_title="Datetime",
         yaxis_title="Price",
-        template="plotly_white",
-        height=700,
-        margin=dict(r=150)  # Add margin to make space for Fibonacci annotations
+        template="plotly_dark",
+        height=600,
+        xaxis_rangeslider_visible=False  # Hide range slider
+    )
+
+    # Automatically adjust Y-axis range based on data
+    fig.update_yaxes(
+        range=[
+            data['Low'].min() * 0.99,  # Slight padding for visibility
+            data['High'].max() * 1.01
+        ]
     )
 
     return fig
+
 
 
 
@@ -644,9 +784,6 @@ def plot_dynamic_chart(ticker, interval, refresh_rate, show_fibonacci, show_ema,
             show_fibonacci, show_ema, show_macd, show_vwap, show_ichimoku
         )
 
-        # Update Chart in Placeholder
-        with placeholder_chart:
-            st.plotly_chart(fig, use_container_width=True)
 
         # Wait for refresh
         time.sleep(refresh_rate)
@@ -716,78 +853,6 @@ def calculate_ichimoku_clouds(df):
     return df
 
 
-        
-# Set your OpenAI API key
-openai.api_key = "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"
-
-def ai_chatbot_tab():
-    """AI chatbot for answering user queries."""
-    st.header("AI Chatbot")
-
-    # Chat history
-    if "chat_history" not in st.session_state:
-        st.session_state.chat_history = []
-
-    # Input box for user query
-    user_input = st.text_input("Ask me anything about trading, alerts, or the app:", key="chat_input")
-
-    # Generate response
-    if user_input:
-        # Call OpenAI API for the response
-        response = generate_ai_response(user_input)
-
-        # Add user query and response to chat history
-        st.session_state.chat_history.append({"user": user_input, "bot": response})
-
-    # Display chat history
-    st.subheader("Chat History")
-    for chat in st.session_state.chat_history:
-        st.write(f"**You:** {chat['user']}")
-        st.write(f"**AI:** {chat['bot']}")
-        
-def suggest_portfolio_allocation(risk_level):
-    """Suggest portfolio allocation based on risk level."""
-    allocations = {
-        "low": {"Bonds": 70, "Stocks": 20, "Real Estate": 10},
-        "medium": {"Bonds": 40, "Stocks": 50, "Real Estate": 10},
-        "high": {"Bonds": 10, "Stocks": 80, "Crypto": 10},
-    }
-    return allocations.get(risk_level, "Risk level not recognized.")
-
-
-def analyze_technical_indicators(ticker):
-    """Analyze stock with technical indicators."""
-    data = yf.download(ticker, period="1mo", interval="1d")
-    data['RSI'] = ta.momentum.rsi(data['Close'], window=14)
-    data['MACD'] = ta.trend.macd_diff(data['Close'])
-    return data.iloc[-1][['RSI', 'MACD']]
-
-        
-def generate_ai_response(user_input):
-    """Generate a response from the AI model with a financial focus."""
-    try:
-        # Query OpenAI GPT model
-        response = openai.ChatCompletion.create(
-            model="gpt-3.5-turbo",
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "You are a highly skilled financial advisor and data analyst. "
-                        "You provide insights on stock trading, options strategies, portfolio management, "
-                        "and risk analysis. Use clear language, and tailor your advice to the user's question. "
-                        "If asked about specific stocks, include real-time or historical data analysis where appropriate."
-                    )
-                },
-                {"role": "user", "content": user_input}
-            ],
-            max_tokens=300,
-            temperature=0.7,
-        )
-        return response['choices'][0]['message']['content']
-    except Exception as e:
-        return f"An error occurred: {e}"
-
 
 # Main Streamlit Application
 def main():
@@ -799,9 +864,9 @@ def main():
     )
     st.title("Real-Time Stock Analysis")
     st.sidebar.title("Settings")
-    st.sidebar.title("Stock Analysis Tools")
     interval = st.sidebar.selectbox("Interval", ["1m", "5m", "15m", "1h", "1d"], index=0)
-    refresh_rate = st.sidebar.slider("Refresh Rate (seconds)", min_value=1, max_value=60, value=5)
+    data_refresh_rate = st.sidebar.slider("Data Refresh Rate (seconds)", min_value=1, max_value=60, value=2)
+    chart_refresh_rate = st.sidebar.slider("Chart Refresh Rate (seconds)", min_value=5, max_value=300, value=10)
     show_fibonacci = st.sidebar.checkbox("Show Fibonacci Retracements", value=True)
     show_ichimoku = st.sidebar.checkbox("Show Ichimoku Clouds", value=True)
     show_ema = st.sidebar.checkbox("Show EMA Indicators", value=True)
@@ -811,13 +876,11 @@ def main():
     show_support_resistance = st.sidebar.checkbox("Show Support/Resistance Levels", value=True)
     show_candlestick_patterns = st.sidebar.checkbox("Show Candlestick Patterns", value=True)
 
-    # Define analysis type tabs
-    analysis_type = st.tabs(["Trading", "AI Chatbot"])
-
-    # Tab for AI Chatbot
-    with analysis_type[1]:
-        ai_chatbot_tab()
-
+    # Initialize session state for refresh counters and last chart update timestamps
+    if "refresh_counters" not in st.session_state:
+        st.session_state.refresh_counters = {}
+    if "last_chart_update" not in st.session_state:
+        st.session_state.last_chart_update = {}
 
     # Validate and process tickers
     if tickers_input:
@@ -830,6 +893,13 @@ def main():
                 placeholder_chart = st.empty()  # Placeholder for the chart
                 placeholder_signal = st.empty()  # Placeholder for signal alerts
 
+                # Initialize session state for ticker
+                if ticker not in st.session_state.refresh_counters:
+                    st.session_state.refresh_counters[ticker] = 0
+                if ticker not in st.session_state.last_chart_update:
+                    st.session_state.last_chart_update[ticker] = time.time()
+
+                # Main loop for updates
                 while True:
                     # Fetch data
                     data = fetch_data(ticker, interval=interval, period="1d")
@@ -837,63 +907,65 @@ def main():
                         st.warning(f"No data available for {ticker}.")
                         break
 
-                    # Calculate Indicators
+                    # Update Data and Indicators
                     try:
                         data = calculate_indicators(data)
-                        if show_ichimoku:
-                            data = calculate_ichimoku_clouds(data)
                     except Exception as e:
                         st.error(f"Error calculating indicators for {ticker}: {e}")
                         break
 
-                    # Plot Interactive Chart
-                    fig = plot_interactive_chart(
-                        ticker=ticker,
-                        data=data,
-                        show_fibonacci=show_fibonacci,
-                        show_ema=show_ema,
-                        show_vwap=show_vwap,
-                        show_ichimoku=show_ichimoku,
-                        show_bollinger=show_bollinger,
-                        show_sma=show_sma,
-                        show_support_resistance=show_support_resistance,
-                        show_candlestick_patterns=show_candlestick_patterns
-                    )
-                    
-                    # Generate a unique key for each chart
-                    import uuid
-                    unique_key = f"{ticker}_chart_{uuid.uuid4().hex}"
-                    placeholder_chart.plotly_chart(fig, use_container_width=True, key=unique_key)
-
-
-
-
                     # Real-Time Signal Alerts
-                    with placeholder_signal:
-                        try:
-                            # Ensure the function returns all 4 values, even if there's an error
-                            signal, signal_time, signal_price, reasoning = check_trade_signal(data)
+                    try:
+                        signal, signal_time, signal_price, reasoning = check_trade_signal(data)
+                        if signal == "BUY":
+                            placeholder_signal.success(
+                                f"**BUY Signal detected for {ticker} at {signal_price:.2f} on {signal_time}**\n\n"
+                                f"Reasoning:\n{reasoning}"
+                            )
+                        elif signal == "SELL":
+                            placeholder_signal.error(
+                                f"**SELL Signal detected for {ticker} at {signal_price:.2f} on {signal_time}**\n\n"
+                                f"Reasoning:\n{reasoning}"
+                            )
+                        else:
+                            placeholder_signal.info(f"No signals detected.\n\nReasoning:\n{reasoning}")
+                    except Exception as e:
+                        placeholder_signal.error(f"Error checking trade signals: {e}")
 
-                            if signal == "BUY":
-                                st.success(
-                                    f"**BUY Signal detected for {ticker} at {signal_price:.2f} on {signal_time}**\n\n"
-                                    f"Reasoning:\n{reasoning}"
-            )
-                            elif signal == "SELL":
-                                st.error(
-                                    f"**SELL Signal detected for {ticker} at {signal_price:.2f} on {signal_time}**\n\n"
-                                    f"Reasoning:\n{reasoning}"
-            )
-                            else:
-                                st.info(f"No signals detected.\n\nReasoning:\n{reasoning}")
+                    # Check if it's time to refresh the chart
+                    current_time = time.time()
+                    if current_time - st.session_state.last_chart_update[ticker] >= chart_refresh_rate:
+                        # Increment the refresh counter
+                        st.session_state.refresh_counters[ticker] += 1
+                        refresh_count = st.session_state.refresh_counters[ticker]
 
-                        except Exception as e:
-                            st.error(f"Error checking trade signals: {e}")
+                        # Generate a unique key using the ticker and refresh count
+                        chart_key = f"{ticker}_chart_{refresh_count}"
 
+                        # Plot Interactive Chart
+                        support, resistance = calculate_market_profile(data)  # Ensure support and resistance are calculated before plotting
 
+                        fig = plot_interactive_chart(
+                            ticker=ticker,
+                            data=data,
+                            show_fibonacci=show_fibonacci,
+                            show_ema=show_ema,
+                            show_vwap=show_vwap,
+                            show_ichimoku=show_ichimoku,
+                            show_bollinger=show_bollinger,
+                            show_sma=show_sma,
+                            show_support=True,  # Enable support line
+                            show_resistance=True,  # Enable resistance line
+                            )
 
-            # Wait for refresh
-            time.sleep(refresh_rate)
+                        
+                        placeholder_chart.plotly_chart(fig, use_container_width=True, key=chart_key)
+
+                        # Update the last chart update timestamp
+                        st.session_state.last_chart_update[ticker] = current_time
+
+                    # Wait for data refresh
+                    time.sleep(data_refresh_rate)
 
 
 if __name__ == "__main__":
